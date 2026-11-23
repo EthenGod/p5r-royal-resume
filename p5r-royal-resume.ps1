@@ -703,7 +703,9 @@ function Select-ResumeSource {
         }
     }
     $defaultSource = if ($available.Count) { $available[0].Number } else { 0 }
-    $prompt = if ($defaultSource) { "选源档 [回车选 $defaultSource，F 选文件，P 换目录，Q 退出]" }
+    $prompt = if ($defaultSource) {
+        '输入源档左侧方括号里的编号（回车选 [{0:00}]，F 选文件，P 换目录，Q 退出）' -f $defaultSource
+    }
         else { '选源档 [F 选文件，P 换目录，Q 退出]' }
     while ($true) {
         $choice = Read-ResumeChoice $prompt (1..16) $defaultSource @('F', 'P')
