@@ -7,7 +7,7 @@
 退出游戏，在 **Windows PowerShell 5.1** 或 **PowerShell 7** 粘贴这行。每次运行都会从 GitHub 的 `main` 分支下载最新脚本。
 
 ```powershell
-& ([ScriptBlock]::Create((Invoke-RestMethod -UseBasicParsing ('https://api.github.com/repos/EthenGod/p5r-royal-resume/contents/p5r-royal-resume.ps1?ref=main&run=' + [guid]::NewGuid().ToString('N')) -Headers @{ Accept = 'application/vnd.github.raw+json' } -ErrorAction Stop).TrimStart([char]0xFEFF)))
+& ([ScriptBlock]::Create((irm https://raw.githubusercontent.com/EthenGod/p5r-royal-resume/main/run.ps1 -UseBasicParsing -ea Stop)))
 ```
 
 输入源档左侧方括号里的编号，例如 `[15]` 就输入 `15`。先看「将执行的操作」，再输入目标槽编号。输入 `y` 应用，完成后进游戏读取目标槽。[查看本命令使用的脚本](https://github.com/EthenGod/p5r-royal-resume/blob/main/p5r-royal-resume.ps1)
