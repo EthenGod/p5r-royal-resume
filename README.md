@@ -7,10 +7,10 @@
 退出游戏，在 **Windows PowerShell 5.1** 或 **PowerShell 7** 粘贴这行。
 
 ```powershell
-& ([ScriptBlock]::Create((Invoke-RestMethod -UseBasicParsing 'https://raw.githubusercontent.com/EthenGod/p5r-royal-resume/dd47123a5a93cd925cd239c5584f4807dc4c47cc/p5r-royal-resume.ps1' -ErrorAction Stop).TrimStart([char]0xFEFF)))
+& ([ScriptBlock]::Create((Invoke-RestMethod -UseBasicParsing 'https://raw.githubusercontent.com/EthenGod/p5r-royal-resume/0e08bb54ab310e552a647cc6a01877d60a429333/p5r-royal-resume.ps1' -ErrorAction Stop).TrimStart([char]0xFEFF)))
 ```
 
-先选源档。工具会说明这个档能跳过最终战，还是从原日期继续。再选目标槽，输入 `y` 应用。目标列表会显示 1–16 号槽的日期、地点、等级、游玩时长和空槽。完成后进游戏读目标槽。[查看本命令使用的脚本](https://github.com/EthenGod/p5r-royal-resume/blob/dd47123a5a93cd925cd239c5584f4807dc4c47cc/p5r-royal-resume.ps1)
+输入想用的源档左侧方括号里的编号，例如 `[15]` 就输入 `15`。工具会说明这个档能跳过最终战，还是从原日期继续。再选目标槽，输入 `y` 应用。目标列表会显示 1–16 号槽的日期、地点、等级、游玩时长和空槽。完成后进游戏读目标槽。[查看本命令使用的脚本](https://github.com/EthenGod/p5r-royal-resume/blob/0e08bb54ab310e552a647cc6a01877d60a429333/p5r-royal-resume.ps1)
 
 ## 哪些源档能用
 
