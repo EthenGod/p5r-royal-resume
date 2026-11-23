@@ -874,7 +874,7 @@ function Select-ResumeSource {
             @{ Expression = { $_.Info.PlayMinutes }; Descending = $true }, Number)
     if ($available.Count) {
         Write-Host '可用源档'
-        Write-ResumeTable $available -ActionHeading '用途'
+        Write-ResumeTable $available -ActionHeading '将执行的操作'
     } else {
         Write-Host '这个目录里没有可用源档。可以选备份文件或换一个存档目录。'
         Write-ResumeTable @($Slots | Where-Object { $_.Status -ne 'Empty' }) -ActionHeading '说明'
