@@ -4,13 +4,13 @@
 
 ## 一条命令
 
-退出游戏，在 **Windows PowerShell 5.1** 或 **PowerShell 7** 粘贴这行。
+退出游戏，在 **Windows PowerShell 5.1** 或 **PowerShell 7** 粘贴这行。每次运行都会从 GitHub 的 `main` 分支下载最新脚本。
 
 ```powershell
-& ([ScriptBlock]::Create((Invoke-RestMethod -UseBasicParsing 'https://raw.githubusercontent.com/EthenGod/p5r-royal-resume/62c5df443d0bebc4bacf1b3063db006713629137/p5r-royal-resume.ps1' -ErrorAction Stop).TrimStart([char]0xFEFF)))
+& ([ScriptBlock]::Create((Invoke-RestMethod -UseBasicParsing ('https://raw.githubusercontent.com/EthenGod/p5r-royal-resume/refs/heads/main/p5r-royal-resume.ps1?run=' + [guid]::NewGuid().ToString('N')) -ErrorAction Stop).TrimStart([char]0xFEFF)))
 ```
 
-输入源档左侧方括号里的编号，例如 `[15]` 就输入 `15`。先看「将执行的操作」，再输入目标槽编号。输入 `y` 应用，完成后进游戏读取目标槽。[查看本命令使用的脚本](https://github.com/EthenGod/p5r-royal-resume/blob/62c5df443d0bebc4bacf1b3063db006713629137/p5r-royal-resume.ps1)
+输入源档左侧方括号里的编号，例如 `[15]` 就输入 `15`。先看「将执行的操作」，再输入目标槽编号。输入 `y` 应用，完成后进游戏读取目标槽。[查看本命令使用的脚本](https://github.com/EthenGod/p5r-royal-resume/blob/main/p5r-royal-resume.ps1)
 
 目标表列出 1–16 号槽的存档内容和空槽。有可写入的空槽时，回车会选第一个。只读的存档仍可作源档，选目标槽时会跳过。
 
