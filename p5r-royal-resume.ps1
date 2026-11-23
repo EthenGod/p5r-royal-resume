@@ -6,24 +6,43 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if (-not ('P5RRoyalResume.V1.SaveCodec' -as [type])) {
+if (-not ('P5RRoyalResume.V2.SaveCodec' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace P5RRoyalResume.V1
+namespace P5RRoyalResume.V2
 {
+    public enum SaveAction
+    {
+        Unavailable,
+        SkipFinalBattle,
+        AfterBattle,
+        PrepareNovember18,
+        UnlockRoyalRoute,
+        AlreadyReady,
+        ThirdSemester,
+        ClearData,
+        PastBranch
+    }
+
     public sealed class SlotInfo
     {
+        public string Hash { get; internal set; }
+        public string FormatError { get; internal set; }
+        public string Title { get; internal set; }
         public int Day { get; internal set; }
+        public int Time { get; internal set; }
         public int Level { get; internal set; }
         public int PlayMinutes { get; internal set; }
-        public int Field { get; internal set; }
-        public bool IsClearData { get; internal set; }
-        public bool CanResume { get; internal set; }
+        public int CouncillorRank { get; internal set; }
+        public bool RoyalRouteOpen { get; internal set; }
+        public bool SteamEncoded { get; internal set; }
+        public SaveAction Action { get; internal set; }
     }
 
     public static class SaveCodec
@@ -32,9 +51,12 @@ namespace P5RRoyalResume.V1
         private const int SlotHeaderSize = 0x190;
         private const int PayloadSize = 0x30720;
         private const int MaximumFileSize = 512 * 1024;
+        private const int November17 = 230;
         private const int December24 = 267;
+        private const int ThirdSemesterStart = 275;
         private const int StoryFlagBase = 0x35e0;
         private const int RoyalRouteFlag = 3186;
+        private const int ThirdSemesterFlag = 164;
         private const int FinalDungeonFlag = 1038;
         private const int FieldPosition = 0x13a00;
         private const int DungeonIndex = 0x3e24;
@@ -76,24 +98,63 @@ namespace P5RRoyalResume.V1
 
         public static SlotInfo Inspect(string path)
         {
-            Save save = Decode(ReadFile(path));
+            byte[] file = ReadFile(path);
+            string hash = Hash(file);
+            Save save;
+            try { save = Decode(file); }
+            catch (InvalidDataException error)
+            {
+                return new SlotInfo { Hash = hash, FormatError = error.Message };
+            }
+            int councillor = FindCouncillor(save.Payload);
             return new SlotInfo {
+                Hash = hash,
+                Title = FirstLine(ReadDescription(save.Header)),
                 Day = BitConverter.ToUInt16(save.Header, 4),
+                Time = save.Header[6],
                 Level = save.Header[9],
                 PlayMinutes = (int)(BitConverter.ToUInt32(save.Header, 0) / 1800),
-                Field = save.Header[12],
-                IsClearData = save.Header[11] == 255,
-                CanResume = IsSourceCheckpoint(save) && FindCouncillor(save.Payload) >= 0
+                CouncillorRank = councillor < 0 ? 0 : BitConverter.ToUInt16(save.Payload, councillor + 8),
+                RoyalRouteOpen = GetFlag(save.Payload, RoyalRouteFlag),
+                SteamEncoded = (save.FileFlags & 0x80000000u) != 0 && (BitConverter.ToUInt32(save.ContainerFields, 12) & 3) == 3,
+                Action = Classify(save, councillor)
             };
         }
 
-        public static byte[] BuildResume(string path)
+        public static byte[] BuildResume(string path, string expectedHash)
         {
-            Save save = Decode(ReadFile(path));
+            byte[] original = ReadFile(path);
+            if (Hash(original) != expectedHash)
+                throw new InvalidDataException("The source save changed after it was displayed.");
+            Save save = Decode(original);
             int councillor = FindCouncillor(save.Payload);
-            if (!IsSourceCheckpoint(save) || councillor < 0)
-                throw new InvalidDataException("The selected save is not a supported December 24 checkpoint.");
+            SaveAction action = Classify(save, councillor);
+            switch (action)
+            {
+                case SaveAction.SkipFinalBattle:
+                    MoveToAfterBattle(save);
+                    OpenRoyalRoute(save.Payload, councillor);
+                    break;
+                case SaveAction.AfterBattle:
+                case SaveAction.UnlockRoyalRoute:
+                    OpenRoyalRoute(save.Payload, councillor);
+                    break;
+                case SaveAction.PrepareNovember18:
+                    SetCouncillorRank(save.Payload, councillor, 9);
+                    break;
+                default:
+                    throw new InvalidDataException("This save is not a supported source.");
+            }
 
+            byte[] packed = Encode(save);
+            Save verified = Decode(packed);
+            if (!BytesEqual(verified.Header, save.Header) || !BytesEqual(verified.Payload, save.Payload))
+                throw new InvalidDataException("The rebuilt save did not pass verification.");
+            return packed;
+        }
+
+        private static void MoveToAfterBattle(Save save)
+        {
             // The scripted resume uses save type 3 with no free-roam field.
             save.Header[11] = 3;
             Array.Clear(save.Header, 12, 2);
@@ -107,43 +168,92 @@ namespace P5RRoyalResume.V1
 
             foreach (int flag in SetAfterBattle) SetFlag(save.Payload, flag, true);
             foreach (int flag in ClearAfterBattle) SetFlag(save.Payload, flag, false);
-            // The December 24 evening scheduler checks BIT_CHK(0x10000000 + 114).
-            SetFlag(save.Payload, RoyalRouteFlag, true);
-            if (BitConverter.ToUInt16(save.Payload, councillor + 8) != 10)
-            {
-                save.Payload[councillor + 8] = 10;
-                save.Payload[councillor + 9] = 0;
-                Array.Clear(save.Payload, councillor + 10, 2);
-            }
+        }
 
-            byte[] packed = Encode(save);
-            Save verified = Decode(packed);
-            if (!BytesEqual(verified.Header, save.Header) || !BytesEqual(verified.Payload, save.Payload))
-                throw new InvalidDataException("The rebuilt save did not pass verification.");
-            return packed;
+        private static void OpenRoyalRoute(byte[] data, int councillor)
+        {
+            // The December 24 evening scheduler checks BIT_CHK(0x10000000 + 114).
+            SetFlag(data, RoyalRouteFlag, true);
+            SetCouncillorRank(data, councillor, 10);
+        }
+
+        private static void SetCouncillorRank(byte[] data, int entry, ushort rank)
+        {
+            if (BitConverter.ToUInt16(data, entry + 8) == rank) return;
+            BitConverter.GetBytes(rank).CopyTo(data, entry + 8);
+            Array.Clear(data, entry + 10, 2);
         }
 
         public static string HashFile(string path)
         {
-            using (var file = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            return Hash(ReadFile(path));
+        }
+
+        private static string Hash(byte[] file)
+        {
             using (var hash = SHA256.Create())
                 return Convert.ToBase64String(hash.ComputeHash(file));
         }
 
-        private static bool IsSourceCheckpoint(Save save)
+        private static SaveAction Classify(Save save, int councillor)
+        {
+            byte[] header = save.Header;
+            byte[] data = save.Payload;
+            int day = BitConverter.ToUInt16(header, 4);
+            int saveType = header[11];
+            bool royalFlag = GetFlag(data, RoyalRouteFlag);
+            if (saveType == 255) return SaveAction.ClearData;
+            if (day > December24 || (day == December24 && header[6] > 4))
+            {
+                if (royalFlag && GetFlag(data, ThirdSemesterFlag))
+                    return day >= ThirdSemesterStart ? SaveAction.ThirdSemester : SaveAction.AlreadyReady;
+                return SaveAction.PastBranch;
+            }
+            if (councillor < 0) return SaveAction.Unavailable;
+            if (IsBeforeBattle(save)) return SaveAction.SkipFinalBattle;
+            if (IsAfterBattle(save)) return SaveAction.AfterBattle;
+
+            int rank = BitConverter.ToUInt16(data, councillor + 8);
+            if (day == November17 && saveType == 0)
+            {
+                if (rank == 9 || (rank == 10 && royalFlag)) return SaveAction.AlreadyReady;
+                return rank == 10 || royalFlag ? SaveAction.UnlockRoyalRoute : SaveAction.PrepareNovember18;
+            }
+
+            // These saves reload before the evening scheduler reads the route flag.
+            if (day > November17 && day < December24 &&
+                (saveType == 0 || saveType == 1 || saveType == 4))
+                return royalFlag && rank == 10 ? SaveAction.AlreadyReady : SaveAction.UnlockRoyalRoute;
+
+            return SaveAction.Unavailable;
+        }
+
+        private static bool IsBeforeBattle(Save save)
         {
             byte[] header = save.Header;
             byte[] data = save.Payload;
             if (BitConverter.ToUInt16(header, 4) != December24 || header[6] != 4 ||
-                header[11] != 0 || !GetFlag(data, FinalDungeonFlag) ||
+                (header[11] != 0 && header[11] != 1) || !GetFlag(data, FinalDungeonFlag) ||
+                header[13] == 0 ||
                 BitConverter.ToUInt16(data, FieldPosition) != header[12] ||
                 BitConverter.ToUInt16(data, FieldPosition + 2) != header[13] ||
                 BitConverter.ToUInt32(data, DungeonIndex) != header[12])
                 return false;
 
             uint progress = BitConverter.ToUInt32(data, StoryProgress);
-            return (header[12] == 161 && header[13] == 51 && progress == 61)
-                || (header[12] == 160 && header[13] == 6 && progress == 68);
+            return (header[12] == 161 && progress >= 61 && progress <= 62)
+                || (header[12] == 160 && progress >= 63 && progress <= 68);
+        }
+
+        private static bool IsAfterBattle(Save save)
+        {
+            byte[] header = save.Header;
+            byte[] data = save.Payload;
+            return BitConverter.ToUInt16(header, 4) == December24 && header[6] == 4 &&
+                header[11] == 3 && header[12] == 0 && header[13] == 0 &&
+                GetFlag(data, FinalDungeonFlag) && BitConverter.ToUInt32(data, FieldPosition) == 0 &&
+                BitConverter.ToUInt32(data, DungeonIndex) == 160 &&
+                BitConverter.ToUInt32(data, StoryProgress) == 69;
         }
 
         private static int FindCouncillor(byte[] data)
@@ -160,13 +270,30 @@ namespace P5RRoyalResume.V1
             return found;
         }
 
+        private static string ReadDescription(byte[] header)
+        {
+            const int offset = 0x90;
+            int end = Array.IndexOf<byte>(header, 0, offset, 0x100);
+            return Encoding.UTF8.GetString(header, offset, (end < 0 ? header.Length : end) - offset);
+        }
+
+        private static string FirstLine(string description)
+        {
+            var line = new StringBuilder();
+            foreach (char value in description)
+            {
+                if (value == '\r' || value == '\n') break;
+                if (!char.IsControl(value) && char.GetUnicodeCategory(value) != UnicodeCategory.Format)
+                    line.Append(value);
+            }
+            return line.ToString().Trim();
+        }
+
         private static void UpdateDescription(byte[] header)
         {
             const int DescriptionOffset = 0x90;
             const int DescriptionSize = 0x100;
-            int end = Array.IndexOf<byte>(header, 0, DescriptionOffset);
-            if (end < 0) end = header.Length;
-            string description = Encoding.UTF8.GetString(header, DescriptionOffset, end - DescriptionOffset);
+            string description = ReadDescription(header);
             int newline = description.IndexOf('\n');
             string suffix = newline < 0 ? "" : description.Substring(newline);
             string title = header[15] == 9
@@ -181,8 +308,8 @@ namespace P5RRoyalResume.V1
         {
             using (FileStream file = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                if (file.Length < ContainerHeaderSize || file.Length > MaximumFileSize)
-                    throw new InvalidDataException("Invalid save file size.");
+                if (file.Length > MaximumFileSize)
+                    throw new InvalidDataException("The file exceeds the size of a supported P5R save.");
                 using (var reader = new BinaryReader(file))
                     return reader.ReadBytes((int)file.Length);
             }
@@ -190,26 +317,34 @@ namespace P5RRoyalResume.V1
 
         private static Save Decode(byte[] file)
         {
-            uint fileFlags = BitConverter.ToUInt32(file, 12);
-            if (file[0] != 'D' || file[1] != 'A' || file[2] != 'T' || file[3] != 'A' ||
-                (fileFlags & 0x80000000u) == 0 || (file.Length & 15) != 0 ||
+            if (file.Length < ContainerHeaderSize ||
+                file[0] != 'D' || file[1] != 'A' || file[2] != 'T' || file[3] != 'A' ||
                 BitConverter.ToUInt32(file, 4) != Crc(file, 8))
-                throw new InvalidDataException("Invalid Steam save container or checksum.");
+                throw new InvalidDataException("Invalid PC save container or checksum.");
 
-            byte[] body = Transform(file, 0x20, Slice(file, 0x10, 16), false);
+            uint fileFlags = BitConverter.ToUInt32(file, 12);
+            bool encrypted = (fileFlags & 0x80000000u) != 0;
+            if (encrypted && (file.Length & 15) != 0)
+                throw new InvalidDataException("Invalid encrypted save length.");
+            byte[] body = encrypted ? Transform(file, 0x20, Slice(file, 0x10, 16), false)
+                : Slice(file, 0x20, file.Length - 0x20);
             byte[] fields = Slice(body, 0, 0x20);
-            int headerEnd = BitConverter.ToUInt16(fields, 2) - 0x20;
+            uint sectionFlags = BitConverter.ToUInt32(fields, 12);
+            bool compressedHeader = (sectionFlags & 1) != 0;
+            bool compressedData = (sectionFlags & 2) != 0;
+            int headerEnd = BitConverter.ToUInt16(fields, compressedHeader ? 2 : 0) - 0x20;
             int dataStart = Align16(headerEnd);
-            uint dataLength = BitConverter.ToUInt32(fields, 8);
-            if ((BitConverter.ToUInt32(fields, 12) & 3) != 3 ||
-                BitConverter.ToUInt16(fields, 0) != ContainerHeaderSize + SlotHeaderSize ||
+            uint dataLength = compressedData ? BitConverter.ToUInt32(fields, 8) : PayloadSize;
+            if (BitConverter.ToUInt16(fields, 0) != ContainerHeaderSize + SlotHeaderSize ||
                 BitConverter.ToUInt32(fields, 4) != PayloadSize ||
                 headerEnd <= 0x20 || dataStart > body.Length || dataLength == 0 ||
                 dataLength > body.Length - dataStart)
                 throw new InvalidDataException("Unsupported Steam save layout.");
 
-            byte[] header = Inflate(body, 0x20, headerEnd - 0x20, SlotHeaderSize);
-            byte[] data = Inflate(body, dataStart, (int)dataLength, PayloadSize);
+            byte[] header = compressedHeader ? Inflate(body, 0x20, headerEnd - 0x20, SlotHeaderSize)
+                : Slice(body, 0x20, SlotHeaderSize);
+            byte[] data = compressedData ? Inflate(body, dataStart, (int)dataLength, PayloadSize)
+                : Slice(body, dataStart, PayloadSize);
             if (BitConverter.ToUInt32(data, 0) != 0x31 || BitConverter.ToUInt32(fields, 16) != Crc(data, 0))
                 throw new InvalidDataException("Unsupported save payload or checksum.");
             return new Save { Header = header, Payload = data, FileFlags = fileFlags, ContainerFields = fields };
@@ -224,6 +359,7 @@ namespace P5RRoyalResume.V1
             save.ContainerFields.CopyTo(body, 0);
             BitConverter.GetBytes((ushort)(ContainerHeaderSize + header.Length)).CopyTo(body, 2);
             SetUInt32(body, 8, (uint)data.Length);
+            SetUInt32(body, 12, BitConverter.ToUInt32(save.ContainerFields, 12) | 3);
             SetUInt32(body, 16, Crc(save.Payload, 0));
             header.CopyTo(body, 0x20);
             data.CopyTo(body, dataStart);
@@ -234,7 +370,7 @@ namespace P5RRoyalResume.V1
             Encoding.ASCII.GetBytes("DATA").CopyTo(file, 0);
             uint seconds = (uint)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
             SetUInt32(file, 8, seconds);
-            SetUInt32(file, 12, save.FileFlags);
+            SetUInt32(file, 12, save.FileFlags | 0x80000000u);
             iv.CopyTo(file, 16);
             Transform(body, 0, iv, true).CopyTo(file, 0x20);
             SetUInt32(file, 4, Crc(file, 8));
@@ -357,134 +493,344 @@ namespace P5RRoyalResume.V1
 '@
 }
 
-function Read-SlotNumber {
-    param([string] $Prompt, [int[]] $Allowed, [int] $Default)
+function Read-ResumeChoice {
+    param([string] $Prompt, [int[]] $Numbers, [int] $Default, [string[]] $Extras)
 
     while ($true) {
-        $label = if ($Default) { "$Prompt [$Default，Q 退出]" } else { "$Prompt [Q 退出]" }
-        $reply = Read-Host $label
+        $reply = Read-Host $Prompt
         if ($null -eq $reply) { return }
         $answer = $reply.Trim()
         if ($answer -eq 'Q') { return }
         if (-not $answer -and $Default) { return $Default }
+        if ($answer -and $answer -in $Extras) { return $answer.ToUpperInvariant() }
         $number = 0
-        if ([int]::TryParse($answer, [ref] $number) -and $number -in $Allowed) { return $number }
-        Write-Host '请输入列表里的编号。'
+        if ([int]::TryParse($answer, [ref] $number) -and $number -in $Numbers) { return $number }
+        Write-Host '请输入显示的编号或选项。'
+    }
+}
+
+function Get-PastedPath {
+    param([string] $Value)
+
+    $path = $Value.Trim()
+    if ($path.Length -ge 2 -and
+        (($path.StartsWith('"') -and $path.EndsWith('"')) -or
+         ($path.StartsWith("'") -and $path.EndsWith("'")))) {
+        $path = $path.Substring(1, $path.Length - 2)
+    }
+    [Environment]::ExpandEnvironmentVariables($path)
+}
+
+function Find-SteamProfiles {
+    param([string] $SteamFolder)
+
+    foreach ($profile in (Get-ChildItem -LiteralPath $SteamFolder -Directory -Force | Sort-Object Name)) {
+        if ($profile.Name -notmatch '^\d{17}$') { continue }
+        $savedata = Join-Path $profile.FullName 'savedata'
+        if ([IO.Directory]::Exists($savedata)) { $savedata }
+    }
+}
+
+function Resolve-ResumeDirectories {
+    param([string] $Path)
+
+    try { $item = Get-Item -LiteralPath (Get-PastedPath $Path) -Force }
+    catch { throw '无法打开这个路径。请检查路径和访问权限。' }
+    if (-not $item.PSIsContainer) {
+        if ($item.Name -ine 'DATA.DAT' -or $item.Directory.Name -notmatch '^DATA(0[1-9]|1[0-6])$') {
+            throw '请选择目标存档目录。可以用 F 单独选择源存档文件。'
+        }
+        $item = $item.Directory.Parent
+    } elseif ($item.Name -match '^DATA(0[1-9]|1[0-6])$' -and $item.Parent) {
+        $item = $item.Parent
+    }
+    if (-not $item.Parent) { throw '请选择包含存档槽的子文件夹。' }
+
+    if ([IO.File]::Exists((Join-Path $item.FullName 'P5R.exe')) -or
+        [IO.File]::Exists((Join-Path $item.FullName 'steam.exe'))) {
+        throw '这个路径是安装目录。请选实际的存档目录，通常在 %APPDATA%\SEGA\P5R\Steam。'
+    }
+    $savedata = Join-Path $item.FullName 'savedata'
+    if ([IO.Directory]::Exists($savedata)) { return $savedata }
+    if ($item.Name -ieq 'savedata' -or [IO.File]::Exists((Join-Path $item.FullName 'SYSTEM\SYSTEM.DAT'))) {
+        return $item.FullName
+    }
+    foreach ($number in 1..16) {
+        if ([IO.File]::Exists((Join-Path $item.FullName ('DATA{0:00}\DATA.DAT' -f $number)))) {
+            return $item.FullName
+        }
+    }
+    if ($item.Name -ieq 'Steam') { return (Find-SteamProfiles $item.FullName) }
+    $steam = Join-Path $item.FullName 'Steam'
+    if ([IO.Directory]::Exists($steam)) { return (Find-SteamProfiles $steam) }
+    throw '这里找不到 P5R 的编号槽。请选 savedata、它的上级目录，或某个槽里的 DATA.DAT。'
+}
+
+function Select-ResumeDirectory {
+    param([string] $InitialPath, [switch] $Manual)
+
+    $directories = @()
+    if ($InitialPath) {
+        try { $directories = @(Resolve-ResumeDirectories $InitialPath) }
+        catch { Write-Host $_.Exception.Message }
+    } elseif (-not $Manual) {
+        $appData = [Environment]::GetFolderPath('ApplicationData')
+        if ($appData) {
+            $steamFolder = Join-Path $appData 'SEGA\P5R\Steam'
+            if ([IO.Directory]::Exists($steamFolder)) {
+                try { $directories = @(Find-SteamProfiles $steamFolder) }
+                catch { Write-Verbose $_.Exception.Message }
+            }
+        }
+    }
+    if (-not $directories.Count -and -not $Manual) {
+        Write-Host '没找到默认的 Steam 存档目录。游戏可以装在任意磁盘，工具只需要存档目录。'
+        Write-Host '如果是第一次玩，请先在游戏里手动存一次档。已有备份的话，可以输入备份的存档目录。'
+    }
+    while ($true) {
+        if ($directories.Count -eq 1) { return $directories[0] }
+        if ($directories.Count -gt 1) {
+            Write-Host '找到多个 Steam 存档目录'
+            for ($i = 0; $i -lt $directories.Count; $i++) {
+                Write-Host ('[{0}] {1}' -f ($i + 1), $directories[$i])
+            }
+            $choice = Read-ResumeChoice '选目录 [P 手动输入，Q 退出]' (1..($directories.Count)) -Extras 'P'
+            if (-not $choice) { return }
+            if ($choice -ne 'P') { return $directories[$choice - 1] }
+        }
+        $path = Read-Host '输入存档目录 [Q 退出]'
+        if (-not $path -or $path.Trim() -eq 'Q') { return }
+        try {
+            $directories = @(Resolve-ResumeDirectories $path)
+            if (-not $directories.Count) { Write-Host '这个 Steam 目录还没有 P5R 存档。' }
+        } catch {
+            Write-Host $_.Exception.Message
+            $directories = @()
+        }
+    }
+}
+
+function Get-ResumeSlots {
+    param([string] $Root)
+
+    foreach ($number in 1..16) {
+        $file = Join-Path $Root ('DATA{0:00}\DATA.DAT' -f $number)
+        $status = 'Read'
+        $info = $null
+        try {
+            $item = Get-Item -LiteralPath $file -Force
+            if ($item.PSIsContainer) { throw 'A directory is using the save file name.' }
+            $info = [P5RRoyalResume.V2.SaveCodec]::Inspect($item.FullName)
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            $status = 'Empty'
+        } catch {
+            $status = 'Blocked'
+            Write-Verbose ('无法读取 {0} 号槽。{1}' -f $number, $_.Exception.GetBaseException().Message)
+        }
+        [pscustomobject] @{ Number = $number; File = $file; Info = $info; Status = $status }
+    }
+}
+
+function Format-ResumeSlot {
+    param($Slot)
+
+    if ($Slot.Status -eq 'Empty') { return '空槽' }
+    if ($Slot.Status -eq 'Blocked') { return '读不了，无法安全覆盖' }
+    $info = $Slot.Info
+    if ($info.FormatError) { return '格式不支持或档案损坏' }
+    $date = [datetime]::new(2016, 4, 1).AddDays($info.Day).ToString('MM/dd')
+    $title = switch ([string] $info.Action) {
+        'AfterBattle' { '12/24 涩谷站前广场（最终战后）' }
+        'ClearData' { "$date 通关存档" }
+        default {
+            if ($info.Title) { $info.Title }
+            else {
+                $times = @('早晨', '上午', '午休', '下午', '放学后', '夜晚', '深夜')
+                $time = if ($info.Time -lt $times.Count) { $times[$info.Time] } else { '时段未知' }
+                "$date $time"
+            }
+        }
+    }
+    '{0}  |  Lv.{1}  |  游玩 {2}:{3:00}' -f $title, $info.Level, [int] [Math]::Floor($info.PlayMinutes / 60), ($info.PlayMinutes % 60)
+}
+
+function Get-ResumeActionText {
+    param($Info)
+
+    switch ([string] $Info.Action) {
+        'SkipFinalBattle' { '跳到最终战后，开启皇家线' }
+        'AfterBattle' {
+            if ($Info.RoyalRouteOpen -and $Info.CouncillorRank -eq 10) { '战后继续，皇家线已开启' }
+            else { '从战后开启皇家线' }
+        }
+        'PrepareNovember18' { '丸喜升到 Coop 9，等 11/18 正常触发' }
+        'UnlockRoyalRoute' { '补开皇家线，保持当前日期和进度' }
+        'AlreadyReady' { '条件已满足，可以直接读取这个档' }
+        'ThirdSemester' { '已在第三学期，可以直接读取这个档' }
+        'ClearData' { '通关存档用于二周目，请选择分岔前的手动档' }
+        'PastBranch' { '已过 12/24 分岔，请选择更早的存档' }
+        default { '请选择 11/17 起的可用档，或 12/24 最终战区域和战后存档点的档' }
+    }
+}
+
+function Test-ResumeSource {
+    param($Slot)
+
+    $Slot.Status -eq 'Read' -and -not $Slot.Info.FormatError -and
+        [string] $Slot.Info.Action -in @('SkipFinalBattle', 'AfterBattle', 'PrepareNovember18', 'UnlockRoyalRoute')
+}
+
+function Select-ResumeSource {
+    param($Slots)
+
+    Write-Host '要跳过重复战斗，请选 12/24 印象空间最底层、通往最终 Boss 的区域，或涩谷站前广场的战后档。'
+    Write-Host '11/17 到 12/23 的可用档可以补开皇家线，仍从原日期继续。'
+    $available = @($Slots | Where-Object { Test-ResumeSource $_ } |
+        Sort-Object -Property @{ Expression = { $_.Info.Day }; Descending = $true },
+            @{ Expression = { [string] $_.Info.Action -eq 'AfterBattle' }; Descending = $true },
+            @{ Expression = { $_.Info.PlayMinutes }; Descending = $true }, Number)
+    if ($available.Count) {
+        Write-Host '可用源档'
+        foreach ($slot in $available) {
+            Write-Host ('[{0:00}] {1}  |  {2}' -f $slot.Number, (Format-ResumeSlot $slot), (Get-ResumeActionText $slot.Info))
+        }
+    } else {
+        Write-Host '这个目录里没有可用源档。可以选备份文件或换一个存档目录。'
+        foreach ($slot in $Slots | Where-Object { $_.Status -ne 'Empty' }) {
+            $text = Format-ResumeSlot $slot
+            if ($slot.Info -and -not $slot.Info.FormatError) { $text += '  |  ' + (Get-ResumeActionText $slot.Info) }
+            Write-Host ('[{0:00}] {1}' -f $slot.Number, $text)
+        }
+    }
+    $defaultSource = if ($available.Count) { $available[0].Number } else { 0 }
+    $prompt = if ($defaultSource) { "选源档 [回车选 $defaultSource，F 选文件，P 换目录，Q 退出]" }
+        else { '选源档 [F 选文件，P 换目录，Q 退出]' }
+    while ($true) {
+        $choice = Read-ResumeChoice $prompt (1..16) $defaultSource @('F', 'P')
+        if (-not $choice) { return }
+        if ($choice -eq 'P') { return 'P' }
+        if ($choice -eq 'F') {
+            $path = Read-Host '输入源文件路径 [回车返回]'
+            if (-not $path) { continue }
+            try {
+                $item = Get-Item -LiteralPath (Get-PastedPath $path) -Force
+                if ($item.PSIsContainer) { throw 'Please select a file.' }
+                $source = [pscustomobject] @{ Number = $null; File = $item.FullName
+                    Info = [P5RRoyalResume.V2.SaveCodec]::Inspect($item.FullName); Status = 'Read' }
+            } catch {
+                Write-Host '无法读取这个文件。请选存档文件本身，例如 DATA.DAT。'
+                continue
+            }
+        } else {
+            $source = $Slots[$choice - 1]
+        }
+        if (Test-ResumeSource $source) { return $source }
+        if ($source.Info -and -not $source.Info.FormatError) { Write-Host (Get-ResumeActionText $source.Info) }
+        else { Write-Host (Format-ResumeSlot $source) }
     }
 }
 
 function Assert-GameClosed {
     if (Get-Process -Name 'P5R' -ErrorAction SilentlyContinue) {
-        throw '请退出 P5R，再运行这条命令。'
+        throw 'P5R 还在运行。请退出游戏后重新运行工具，避免游戏覆盖存档。'
     }
 }
 
 function Get-SlotHash {
     param([string] $Path)
 
-    if ([IO.File]::Exists($Path)) { [P5RRoyalResume.V1.SaveCodec]::HashFile($Path) }
+    if ([IO.File]::Exists($Path)) { [P5RRoyalResume.V2.SaveCodec]::HashFile($Path) }
 }
 
-function Invoke-RoyalResume {
+function Set-ResumeSlot {
+    param([string] $Root, $Source, $Target)
+
     Assert-GameClosed
-
-    Write-Host 'P5R 皇家版续档'
-    if ($SaveDirectory) {
-        $root = (Get-Item -LiteralPath $SaveDirectory).FullName
-    } else {
-        $steamRoot = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'SEGA\P5R\Steam'
-        if (-not (Test-Path -LiteralPath $steamRoot -PathType Container)) {
-            throw '找不到 Windows Steam 版 P5R 的存档。'
-        }
-        $profiles = @(Get-ChildItem -LiteralPath $steamRoot -Directory |
-            Where-Object { $_.Name -match '^\d{17}$' -and [IO.Directory]::Exists((Join-Path $_.FullName 'savedata')) })
-        if ($profiles.Count -eq 0) { throw '找不到 Steam 存档槽。' }
-        $profileIndex = 1
-        if ($profiles.Count -gt 1) {
-            for ($i = 0; $i -lt $profiles.Count; $i++) { Write-Host ('[{0}] Steam ID {1}' -f ($i + 1), $profiles[$i].Name) }
-            $profileIndex = Read-SlotNumber '选 Steam 存档' (1..($profiles.Count))
-            if (-not $profileIndex) { return }
-        }
-        $root = Join-Path $profiles[$profileIndex - 1].FullName 'savedata'
-    }
-
-    if (-not [IO.Directory]::Exists($root)) { throw '存档路径需要是文件夹。' }
-    $slots = @(1..16 | ForEach-Object {
-        $number = $_
-        $file = Join-Path $root ('DATA{0:00}\DATA.DAT' -f $number)
-        $info = $null
-        $exists = [IO.File]::Exists($file)
-        if ($exists) {
-            try { $info = [P5RRoyalResume.V1.SaveCodec]::Inspect($file) }
-            catch { Write-Verbose ("读取 {0} 号槽失败。{1}" -f $number, $_.Exception.GetBaseException().Message) }
-        }
-        [pscustomobject] @{ Number = $number; File = $file; Info = $info; Exists = $exists }
-    })
-    $sources = @($slots | Where-Object { $_.Info -and $_.Info.CanResume } |
-        Sort-Object -Property { $_.Info.PlayMinutes } -Descending)
-    if ($sources.Count -eq 0) {
-        throw '没有找到可用的源存档。需要 12 月 24 日的印象空间最底层安全屋或最终 Boss 前的档。'
-    }
-    Write-Host '可用的源存档'
-    foreach ($slot in $sources) {
-        $location = if ($slot.Info.Field -eq 161) { '印象空间最底层' } else { '最终 Boss 前' }
-        Write-Host ('[{0:00}] 12/24 {1}  Lv.{2}' -f $slot.Number, $location, $slot.Info.Level)
-    }
-    $sourceNumber = Read-SlotNumber '选源槽' $sources.Number $sources[0].Number
-    if (-not $sourceNumber) { return }
-    $source = $slots[$sourceNumber - 1]
-    $sourceHash = Get-SlotHash $source.File
-    if (-not $sourceHash) { throw '源存档已移走。请重新运行。' }
-
-    $empty = @($slots | Where-Object { -not $_.Exists } | Select-Object -ExpandProperty Number)
-    if ($empty.Count) { Write-Host ('空槽 {0}' -f ($empty -join '、')) }
-    else { Write-Host '16 个槽都已有存档。选中后会先备份原档。' }
-    $defaultTarget = if ($empty.Count) { $empty[0] } else { 0 }
-    $targetNumber = Read-SlotNumber '选目标槽（1–16）' (1..16) $defaultTarget
-    if (-not $targetNumber) { return }
-    $target = $slots[$targetNumber - 1]
-    $targetHash = Get-SlotHash $target.File
-    $action = if ($targetHash) { '备份并替换' } else { '写入' }
-    Write-Host ('从 {0} 号槽制作 12 月 24 日晚的皇家版续档，{1} {2} 号槽。' -f $sourceNumber, $action, $targetNumber)
-    if (([string] (Read-Host '应用改动 [y/N]')).Trim() -ne 'y') { Write-Host '已取消。'; return }
-
-    $profileRoot = (Get-Item -LiteralPath $root).Parent.FullName
+    $sourceHash = $Source.Info.Hash
+    $targetHash = if ($Target.Info) { $Target.Info.Hash }
+    $profileRoot = (Get-Item -LiteralPath $Root).Parent.FullName
     $lockFile = Join-Path $profileRoot '.p5r-royal-resume.lock'
-    $lock = [IO.FileStream]::new($lockFile, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite,
-        [IO.FileShare]::None, 4096, [IO.FileOptions]::DeleteOnClose)
     try {
-        Assert-GameClosed
-        if ((Get-SlotHash $source.File) -ne $sourceHash -or (Get-SlotHash $target.File) -ne $targetHash) {
-            throw '存档在选择后发生了变化。请重新运行。'
+        $lock = [IO.FileStream]::new($lockFile, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::None, 4096, [IO.FileOptions]::DeleteOnClose)
+    } catch {
+        throw '无法锁定存档目录。请检查写入权限，并关闭其他正在使用此目录的续档工具。'
+    }
+    try {
+        if ((Get-SlotHash $Source.File) -cne $sourceHash -or (Get-SlotHash $Target.File) -cne $targetHash) {
+            throw '源档或目标槽在显示后发生了变化。请重新运行，确认最新内容。'
         }
-        $candidate = [P5RRoyalResume.V1.SaveCodec]::BuildResume($source.File)
-        $targetFolder = Split-Path -Parent $target.File
+        $candidate = [P5RRoyalResume.V2.SaveCodec]::BuildResume($Source.File, $sourceHash)
+        $targetFolder = Split-Path -Parent $Target.File
         [void] [IO.Directory]::CreateDirectory($targetFolder)
         $stage = Join-Path $targetFolder ('.p5r-royal-resume-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
         try {
             [IO.File]::WriteAllBytes($stage, $candidate)
             $stageHash = Get-SlotHash $stage
             Assert-GameClosed
-            if ((Get-SlotHash $source.File) -ne $sourceHash -or (Get-SlotHash $target.File) -ne $targetHash) {
-                throw '存档在写入前发生了变化。请重新运行。'
+            if ((Get-SlotHash $Source.File) -cne $sourceHash -or (Get-SlotHash $Target.File) -cne $targetHash) {
+                throw '源档或目标槽在显示后发生了变化。请重新运行，确认最新内容。'
             }
             if ($targetHash) {
                 $backupFolder = Join-Path $profileRoot 'p5r-royal-resume-backups'
                 [void] [IO.Directory]::CreateDirectory($backupFolder)
-                $backup = Join-Path $backupFolder ('{0:yyyyMMdd-HHmmss}-{1}-DATA{2:00}.DAT' -f (Get-Date), ([guid]::NewGuid().ToString('N').Substring(0, 8)), $targetNumber)
-                [IO.File]::Replace($stage, $target.File, $backup)
+                $backup = Join-Path $backupFolder ('{0:yyyyMMdd-HHmmss}-{1}-DATA{2:00}.DAT' -f (Get-Date), ([guid]::NewGuid().ToString('N').Substring(0, 8)), $Target.Number)
+                [IO.File]::Replace($stage, $Target.File, $backup)
                 Write-Host "备份 $backup"
             } else {
-                [IO.File]::Move($stage, $target.File)
+                [IO.File]::Move($stage, $Target.File)
             }
-            if ((Get-SlotHash $target.File) -ne $stageHash) { throw '写入后校验失败。请使用备份恢复。' }
+            if ((Get-SlotHash $Target.File) -cne $stageHash) { throw '写入后校验失败。请检查目标槽和备份。' }
         } finally {
             if ([IO.File]::Exists($stage)) { [IO.File]::Delete($stage) }
         }
     } finally {
         $lock.Dispose()
     }
-    Write-Host ("已写入 {0} 号槽。进游戏读取该档，从 12 月 24 日晚的涩谷站前广场继续。" -f $targetNumber)
+}
+
+function Invoke-RoyalResume {
+    Write-Host 'P5R 皇家版续档'
+    $root = Select-ResumeDirectory -InitialPath $SaveDirectory
+    while ($root) {
+        Write-Host "存档目录 $root"
+        $slots = @(Get-ResumeSlots $root)
+        $source = Select-ResumeSource $slots
+        if (-not $source) { return }
+        if ($source -ne 'P') { break }
+        $root = Select-ResumeDirectory -Manual
+    }
+    if (-not $root) { return }
+
+    # Re-read before showing the targets so the labels and write checks use the same snapshot.
+    $targets = @(Get-ResumeSlots $root)
+    Write-Host '目标槽（已有档会备份）'
+    foreach ($slot in $targets) {
+        Write-Host ('[{0:00}] {1}' -f $slot.Number, (Format-ResumeSlot $slot))
+    }
+    $choices = @($targets | Where-Object { $_.Status -ne 'Blocked' })
+    if (-not $choices.Count) { throw '这个目录的槽都无法安全写入。请检查访问权限。' }
+    $empty = $choices | Where-Object { $_.Status -eq 'Empty' } | Select-Object -First 1
+    $prompt = if ($empty) { "选目标槽 [回车选空槽 $($empty.Number)，Q 退出]" } else { '选要备份并替换的槽 [Q 退出]' }
+    $targetNumber = Read-ResumeChoice $prompt $choices.Number $empty.Number
+    if (-not $targetNumber) { return }
+    $target = $targets[$targetNumber - 1]
+    if ($source.File -ieq $target.File -and [string] $source.Info.Action -eq 'AfterBattle' -and
+        $source.Info.SteamEncoded -and $source.Info.RoyalRouteOpen -and $source.Info.CouncillorRank -eq 10) {
+        Write-Host '这个槽已是可用的皇家线战后档，可以直接读取。'
+        return
+    }
+    $sourceName = if ($source.Number) { "$($source.Number) 号槽" } else { [IO.Path]::GetFileName($source.File) }
+    Write-Host ('源档 {0}  |  {1}' -f $sourceName, (Get-ResumeActionText $source.Info))
+    Write-Host ('目标 [{0:00}] {1}' -f $targetNumber, (Format-ResumeSlot $target))
+    if (([string] (Read-Host '应用改动 [y/N]')).Trim() -ne 'y') { Write-Host '已取消。'; return }
+
+    Set-ResumeSlot $root $source $target
+    if ([string] $source.Info.Action -in @('SkipFinalBattle', 'AfterBattle')) {
+        Write-Host ("已写入 {0} 号槽。读取该档，从 12 月 24 日晚的涩谷站前广场继续。" -f $targetNumber)
+    } else {
+        Write-Host ("已写入 {0} 号槽。读取该档，从原日期继续。" -f $targetNumber)
+    }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
