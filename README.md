@@ -7,7 +7,7 @@
 退出游戏，在 **Windows PowerShell 5.1** 或 **PowerShell 7** 粘贴这行。
 
 ```powershell
-& ([ScriptBlock]::Create((Invoke-RestMethod -UseBasicParsing 'https://raw.githubusercontent.com/EthenGod/p5r-royal-resume/ba222209c8f5de28ff097dfe4056c635e6022aac/p5r-royal-resume.ps1')))
+& ([ScriptBlock]::Create((Invoke-RestMethod -UseBasicParsing 'https://raw.githubusercontent.com/EthenGod/p5r-royal-resume/ba222209c8f5de28ff097dfe4056c635e6022aac/p5r-royal-resume.ps1' -ErrorAction Stop).TrimStart([char]0xFEFF)))
 ```
 
 选源槽和目标槽，输入 `y`。完成后打开游戏，读取目标槽。命令固定下载这一版的脚本。[查看脚本](https://github.com/EthenGod/p5r-royal-resume/blob/ba222209c8f5de28ff097dfe4056c635e6022aac/p5r-royal-resume.ps1)
