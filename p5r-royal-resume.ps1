@@ -683,8 +683,10 @@ function Test-ResumeSource {
 function Select-ResumeSource {
     param($Slots)
 
+    Write-Host ''
     Write-Host '要跳过重复战斗，请选 12/24 印象空间最底层、通往最终 Boss 的区域，或涩谷站前广场的战后档。'
     Write-Host '11/17 到 12/23 的可用档可以补开皇家线，仍从原日期继续。'
+    Write-Host ''
     $available = @($Slots | Where-Object { Test-ResumeSource $_ } |
         Sort-Object -Property @{ Expression = { $_.Info.Day }; Descending = $true },
             @{ Expression = { [string] $_.Info.Action -eq 'AfterBattle' }; Descending = $true },
@@ -707,6 +709,7 @@ function Select-ResumeSource {
         '输入源档左侧方括号里的编号（回车选 [{0:00}]，F 选文件，P 换目录，Q 退出）' -f $defaultSource
     }
         else { '选源档 [F 选文件，P 换目录，Q 退出]' }
+    Write-Host ''
     while ($true) {
         $choice = Read-ResumeChoice $prompt (1..16) $defaultSource @('F', 'P')
         if (-not $choice) { return }
@@ -806,6 +809,7 @@ function Invoke-RoyalResume {
 
     # Re-read before showing the targets so the labels and write checks use the same snapshot.
     $targets = @(Get-ResumeSlots $root)
+    Write-Host ''
     Write-Host '目标槽（已有档会备份）'
     foreach ($slot in $targets) {
         Write-Host ('[{0:00}] {1}' -f $slot.Number, (Format-ResumeSlot $slot))
@@ -814,6 +818,7 @@ function Invoke-RoyalResume {
     if (-not $choices.Count) { throw '这个目录的槽都无法安全写入。请检查访问权限。' }
     $empty = $choices | Where-Object { $_.Status -eq 'Empty' } | Select-Object -First 1
     $prompt = if ($empty) { "选目标槽 [回车选空槽 $($empty.Number)，Q 退出]" } else { '选要备份并替换的槽 [Q 退出]' }
+    Write-Host ''
     $targetNumber = Read-ResumeChoice $prompt $choices.Number $empty.Number
     if (-not $targetNumber) { return }
     $target = $targets[$targetNumber - 1]
@@ -823,8 +828,10 @@ function Invoke-RoyalResume {
         return
     }
     $sourceName = if ($source.Number) { "$($source.Number) 号槽" } else { [IO.Path]::GetFileName($source.File) }
+    Write-Host ''
     Write-Host ('源档 {0}  |  {1}' -f $sourceName, (Get-ResumeActionText $source.Info))
     Write-Host ('目标 [{0:00}] {1}' -f $targetNumber, (Format-ResumeSlot $target))
+    Write-Host ''
     if (([string] (Read-Host '应用改动 [y/N]')).Trim() -ne 'y') { Write-Host '已取消。'; return }
 
     Set-ResumeSlot $root $source $target
