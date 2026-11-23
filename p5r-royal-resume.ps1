@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if (-not ('P5RRoyalResume.V3.SaveCodec' -as [type])) {
+if (-not ('P5RRoyalResume.V4.SaveCodec' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -16,7 +16,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace P5RRoyalResume.V3
+namespace P5RRoyalResume.V4
 {
     public enum SaveAction
     {
@@ -393,7 +393,8 @@ namespace P5RRoyalResume.V3
         // Add or verify the zlib wrapper explicitly for Windows PowerShell 5.1.
         private static byte[] Inflate(byte[] bytes, int start, int length, int expectedSize)
         {
-            if (length < 6 || bytes[start] != 0x78 || (bytes[start + 1] & 0x20) != 0 ||
+            if (length < 6 || (bytes[start] & 0x0f) != 8 || (bytes[start] >> 4) > 7 ||
+                (bytes[start + 1] & 0x20) != 0 ||
                 ((bytes[start] << 8) + bytes[start + 1]) % 31 != 0)
                 throw new InvalidDataException("Invalid zlib header.");
             byte[] raw = new byte[expectedSize];
@@ -636,7 +637,7 @@ function Read-ResumeChoice {
         if ($answer -and $answer -in $Extras) { return $answer.ToUpperInvariant() }
         $number = 0
         if ([int]::TryParse($answer, [ref] $number) -and $number -in $Numbers) { return $number }
-        Write-Host '请输入显示的编号或选项。'
+        Write-Host '这个编号或选项不可用，请重试。'
     }
 }
 
@@ -691,9 +692,12 @@ function Resolve-ResumeDirectories {
             return $item.FullName
         }
     }
-    if ($item.Name -ieq 'Steam') { return (Find-SteamProfiles $item.FullName) }
-    $steam = Join-Path $item.FullName 'Steam'
-    if ([IO.Directory]::Exists($steam)) { return (Find-SteamProfiles $steam) }
+    $steam = if ($item.Name -ieq 'Steam') { $item.FullName } else { Join-Path $item.FullName 'Steam' }
+    if ([IO.Directory]::Exists($steam)) {
+        $profiles = @(Find-SteamProfiles $steam)
+        if (-not $profiles.Count) { throw '这个 Steam 目录还没有 P5R 存档。' }
+        return $profiles
+    }
     throw '这里找不到 P5R 的编号槽。请选 savedata、它的上级目录，或某个槽里的 DATA.DAT。'
 }
 
@@ -713,10 +717,10 @@ function Select-ResumeDirectory {
                 catch { Write-Verbose $_.Exception.Message }
             }
         }
-    }
-    if (-not $directories.Count -and -not $Manual) {
-        Write-Host '没找到默认的 Steam 存档目录。游戏可以装在任意磁盘，工具只需要存档目录。'
-        Write-Host '如果是第一次玩，请先在游戏里手动存一次档。已有备份的话，可以输入备份的存档目录。'
+        if (-not $directories.Count) {
+            Write-Host '没找到默认的 Steam 存档目录。游戏可以装在任意磁盘，工具只需要存档目录。'
+            Write-Host '如果是第一次玩，请先在游戏里手动存一次档。已有备份的话，可以输入备份的存档目录。'
+        }
     }
     while ($true) {
         if ($directories.Count -eq 1) { return $directories[0] }
@@ -733,7 +737,6 @@ function Select-ResumeDirectory {
         if (-not $path -or $path.Trim() -eq 'Q') { return }
         try {
             $directories = @(Resolve-ResumeDirectories $path)
-            if (-not $directories.Count) { Write-Host '这个 Steam 目录还没有 P5R 存档。' }
         } catch {
             Write-Host $_.Exception.Message
             $directories = @()
@@ -745,20 +748,25 @@ function Get-ResumeSlots {
     param([string] $Root)
 
     foreach ($number in 1..16) {
-        $file = Join-Path $Root ('DATA{0:00}\DATA.DAT' -f $number)
-        $status = 'Read'
+        $folder = Join-Path $Root ('DATA{0:00}' -f $number)
+        $file = [IO.Path]::Combine($folder, 'DATA.DAT')
         $info = $null
+        $writeBlock = $null
         try {
             $item = Get-Item -LiteralPath $file -Force
-            if ($item.PSIsContainer) { throw 'A directory is using the save file name.' }
-            $info = [P5RRoyalResume.V3.SaveCodec]::Inspect($item.FullName)
+            if ($item.PSIsContainer) {
+                $writeBlock = '存档文件名被文件夹占用'
+            } else {
+                $info = [P5RRoyalResume.V4.SaveCodec]::Inspect($item.FullName)
+                if ($item.IsReadOnly) { $writeBlock = '只读，无法覆盖' }
+            }
         } catch [System.Management.Automation.ItemNotFoundException] {
-            $status = 'Empty'
+            if ([IO.File]::Exists($folder)) { $writeBlock = '槽位目录名被文件占用' }
         } catch {
-            $status = 'Blocked'
+            $writeBlock = '无法读取或覆盖'
             Write-Verbose ('无法读取 {0} 号槽。{1}' -f $number, $_.Exception.GetBaseException().Message)
         }
-        [pscustomobject] @{ Number = $number; File = $file; Info = $info; Status = $status }
+        [pscustomobject] @{ Number = $number; File = $file; Info = $info; WriteBlock = $writeBlock }
     }
 }
 
@@ -766,11 +774,12 @@ function Get-ResumeSlotDisplay {
     param($Slot)
 
     $info = $Slot.Info
-    $description = if ($Slot.Status -eq 'Empty') { '空槽' }
-        elseif ($Slot.Status -eq 'Blocked') { '读不了，无法安全覆盖' }
-        elseif ($info.FormatError) { '格式不支持或档案损坏' }
+    $restriction = if ($info -and $Slot.WriteBlock) { "（$($Slot.WriteBlock)）" }
+    $description = if (-not $info) {
+        if ($Slot.WriteBlock) { $Slot.WriteBlock } else { '空槽' }
+    } elseif ($info.FormatError) { '格式不支持或档案损坏' }
     if ($description) {
-        return [pscustomobject] @{ Title = $description; Level = ''; PlayTime = '' }
+        return [pscustomobject] @{ Title = "$description$restriction"; Level = ''; PlayTime = '' }
     }
     $date = [datetime]::new(2016, 4, 1).AddDays($info.Day).ToString('MM/dd')
     $title = switch ([string] $info.Action) {
@@ -786,7 +795,7 @@ function Get-ResumeSlotDisplay {
         }
     }
     [pscustomobject] @{
-        Title = $title
+        Title = "$title$restriction"
         Level = [string] $info.Level
         PlayTime = '{0}:{1:00}' -f [int] [Math]::Floor($info.PlayMinutes / 60), ($info.PlayMinutes % 60)
     }
@@ -822,7 +831,7 @@ function Get-ResumeActionText {
 function Test-ResumeSource {
     param($Slot)
 
-    $Slot.Status -eq 'Read' -and -not $Slot.Info.FormatError -and
+    $Slot.Info -and -not $Slot.Info.FormatError -and
         [string] $Slot.Info.Action -in @('SkipFinalBattle', 'AfterBattle', 'PrepareNovember18', 'UnlockRoyalRoute')
 }
 
@@ -855,7 +864,7 @@ function Write-ResumeTable {
         }
     }
     if ($width -ge 36) {
-        foreach ($line in [P5RRoyalResume.V3.SlotTable]::Render($rows.ToArray(), $width - 1)) {
+        foreach ($line in [P5RRoyalResume.V4.SlotTable]::Render($rows.ToArray(), $width - 1)) {
             Write-Host $line
         }
     }
@@ -877,7 +886,7 @@ function Select-ResumeSource {
         Write-ResumeTable $available -ActionHeading '将执行的操作'
     } else {
         Write-Host '这个目录里没有可用源档。可以选备份文件或换一个存档目录。'
-        Write-ResumeTable @($Slots | Where-Object { $_.Status -ne 'Empty' }) -ActionHeading '说明'
+        Write-ResumeTable @($Slots | Where-Object { $_.Info -or $_.WriteBlock }) -ActionHeading '说明'
     }
     $defaultSource = if ($available.Count) { $available[0].Number } else { 0 }
     $prompt = if ($defaultSource) {
@@ -896,7 +905,7 @@ function Select-ResumeSource {
                 $item = Get-Item -LiteralPath (Get-PastedPath $path) -Force
                 if ($item.PSIsContainer) { throw 'Please select a file.' }
                 $source = [pscustomobject] @{ Number = $null; File = $item.FullName
-                    Info = [P5RRoyalResume.V3.SaveCodec]::Inspect($item.FullName); Status = 'Read' }
+                    Info = [P5RRoyalResume.V4.SaveCodec]::Inspect($item.FullName); WriteBlock = $null }
             } catch {
                 Write-Host '无法读取这个文件。请选存档文件本身，例如 DATA.DAT。'
                 continue
@@ -919,7 +928,16 @@ function Assert-GameClosed {
 function Get-SlotHash {
     param([string] $Path)
 
-    if ([IO.File]::Exists($Path)) { [P5RRoyalResume.V3.SaveCodec]::HashFile($Path) }
+    if ([IO.File]::Exists($Path)) { [P5RRoyalResume.V4.SaveCodec]::HashFile($Path) }
+}
+
+function Assert-ResumeSlotsCurrent {
+    param($Source, $Target)
+
+    $targetHash = if ($Target.Info) { $Target.Info.Hash }
+    if ((Get-SlotHash $Source.File) -cne $Source.Info.Hash -or (Get-SlotHash $Target.File) -cne $targetHash) {
+        throw '源档或目标槽在显示后发生了变化。请重新运行，确认最新内容。'
+    }
 }
 
 function Set-ResumeSlot {
@@ -937,10 +955,8 @@ function Set-ResumeSlot {
         throw '无法锁定存档目录。请检查写入权限，并关闭其他正在使用此目录的续档工具。'
     }
     try {
-        if ((Get-SlotHash $Source.File) -cne $sourceHash -or (Get-SlotHash $Target.File) -cne $targetHash) {
-            throw '源档或目标槽在显示后发生了变化。请重新运行，确认最新内容。'
-        }
-        $candidate = [P5RRoyalResume.V3.SaveCodec]::BuildResume($Source.File, $sourceHash)
+        Assert-ResumeSlotsCurrent $Source $Target
+        $candidate = [P5RRoyalResume.V4.SaveCodec]::BuildResume($Source.File, $sourceHash)
         $targetFolder = Split-Path -Parent $Target.File
         [void] [IO.Directory]::CreateDirectory($targetFolder)
         $stage = Join-Path $targetFolder ('.p5r-royal-resume-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
@@ -948,9 +964,7 @@ function Set-ResumeSlot {
             [IO.File]::WriteAllBytes($stage, $candidate)
             $stageHash = Get-SlotHash $stage
             Assert-GameClosed
-            if ((Get-SlotHash $Source.File) -cne $sourceHash -or (Get-SlotHash $Target.File) -cne $targetHash) {
-                throw '源档或目标槽在显示后发生了变化。请重新运行，确认最新内容。'
-            }
+            Assert-ResumeSlotsCurrent $Source $Target
             if ($targetHash) {
                 $backupFolder = Join-Path $profileRoot 'p5r-royal-resume-backups'
                 [void] [IO.Directory]::CreateDirectory($backupFolder)
@@ -987,16 +1001,20 @@ function Invoke-RoyalResume {
     Write-Host ''
     Write-Host '目标槽（已有档会备份）'
     Write-ResumeTable $targets
-    $choices = @($targets | Where-Object { $_.Status -ne 'Blocked' })
+    $choices = @($targets | Where-Object { -not $_.WriteBlock })
     if (-not $choices.Count) { throw '这个目录的槽都无法安全写入。请检查访问权限。' }
-    $empty = $choices | Where-Object { $_.Status -eq 'Empty' } | Select-Object -First 1
-    $prompt = if ($empty) { "选目标槽 [回车选空槽 $($empty.Number)，Q 退出]" } else { '选要备份并替换的槽 [Q 退出]' }
+    $empty = $choices | Where-Object { -not $_.Info } | Select-Object -First 1
+    $defaultTarget = if ($empty) { $empty.Number } else { 0 }
+    $prompt = if ($defaultTarget) {
+        '输入可写入的目标槽编号（回车选空槽 [{0:00}]，Q 退出）' -f $defaultTarget
+    } else { '输入要备份并替换的槽编号（Q 退出）' }
     Write-Host ''
-    $targetNumber = Read-ResumeChoice $prompt $choices.Number $empty.Number
+    $targetNumber = Read-ResumeChoice $prompt $choices.Number $defaultTarget
     if (-not $targetNumber) { return }
     $target = $targets[$targetNumber - 1]
     if ($source.File -ieq $target.File -and [string] $source.Info.Action -eq 'AfterBattle' -and
         $source.Info.SteamEncoded -and $source.Info.RoyalRouteOpen -and $source.Info.CouncillorRank -eq 10) {
+        Assert-ResumeSlotsCurrent $source $target
         Write-Host '这个槽已是可用的皇家线战后档，可以直接读取。'
         return
     }
