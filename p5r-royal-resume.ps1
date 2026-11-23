@@ -6,16 +6,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if (-not ('P5RRoyalResume.V2.SaveCodec' -as [type])) {
+if (-not ('P5RRoyalResume.V3.SaveCodec' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace P5RRoyalResume.V2
+namespace P5RRoyalResume.V3
 {
     public enum SaveAction
     {
@@ -489,6 +490,136 @@ namespace P5RRoyalResume.V2
             return true;
         }
     }
+
+    public static class SlotTable
+    {
+        private const int Gap = 2;
+
+        public static string[] Render(string[][] rows, int windowWidth)
+        {
+            int[] widths = new int[rows[0].Length];
+            foreach (string[] row in rows)
+                for (int column = 0; column < widths.Length; column++)
+                    widths[column] = Math.Max(widths[column], Measure(row[column]));
+
+            int remaining = windowWidth - widths[0] - widths[2] - widths[3] - Gap * (widths.Length - 1);
+            if (widths.Length == 5)
+            {
+                // Share a narrow window in proportion to each text column's contents.
+                int totalTextWidth = widths[1] + widths[4];
+                int actionRoom = (remaining * widths[4] + totalTextWidth / 2) / totalTextWidth;
+                actionRoom = Math.Min(remaining - 4, Math.Max(4, actionRoom));
+                actionRoom = Math.Min(widths[4], actionRoom);
+                widths[1] = Math.Min(widths[1], remaining - actionRoom);
+                widths[4] = Math.Min(widths[4], remaining - widths[1]);
+            }
+            else
+            {
+                widths[1] = Math.Min(widths[1], remaining);
+            }
+
+            var result = new List<string>();
+            foreach (string[] row in rows)
+            {
+                var cells = new List<string>[widths.Length];
+                int lines = 1;
+                for (int column = 0; column < widths.Length; column++)
+                {
+                    cells[column] = Wrap(row[column], widths[column]);
+                    lines = Math.Max(lines, cells[column].Count);
+                }
+                for (int line = 0; line < lines; line++)
+                {
+                    var output = new StringBuilder();
+                    for (int column = 0; column < widths.Length; column++)
+                    {
+                        if (column > 0) output.Append(' ', Gap);
+                        string value = line < cells[column].Count ? cells[column][line] : "";
+                        int padding = widths[column] - Measure(value);
+                        bool alignRight = column == 2 || column == 3;
+                        if (alignRight) output.Append(' ', padding);
+                        output.Append(value);
+                        if (!alignRight) output.Append(' ', padding);
+                    }
+                    result.Add(output.ToString().TrimEnd());
+                }
+            }
+            return result.ToArray();
+        }
+
+        private static List<string> Wrap(string value, int width)
+        {
+            var result = new List<string>();
+            var line = new StringBuilder();
+            int cells = 0;
+            int breakIndex = -1;
+            int breakWidth = 0;
+            var elements = StringInfo.GetTextElementEnumerator(value);
+            while (elements.MoveNext())
+            {
+                string element = elements.GetTextElement();
+                int size = CellWidth(element);
+                bool whitespace = string.IsNullOrWhiteSpace(element);
+                if (cells + size > width)
+                {
+                    if (!whitespace && breakIndex >= 0 && breakWidth >= width / 2)
+                    {
+                        result.Add(line.ToString(0, breakIndex).TrimEnd());
+                        line.Remove(0, breakIndex + 1);
+                        cells = Measure(line.ToString());
+                    }
+                    else
+                    {
+                        result.Add(line.ToString().TrimEnd());
+                        line.Clear();
+                        cells = 0;
+                    }
+                    breakIndex = -1;
+                    breakWidth = 0;
+                }
+                if (whitespace)
+                {
+                    if (line.Length == 0) continue;
+                    breakIndex = line.Length;
+                    breakWidth = cells;
+                }
+                line.Append(element);
+                cells += size;
+            }
+            if (line.Length > 0 || result.Count == 0) result.Add(line.ToString().TrimEnd());
+            return result;
+        }
+
+        private static int Measure(string value)
+        {
+            int width = 0;
+            var elements = StringInfo.GetTextElementEnumerator(value);
+            while (elements.MoveNext()) width += CellWidth(elements.GetTextElement());
+            return width;
+        }
+
+        private static int CellWidth(string element)
+        {
+            UnicodeCategory category = CharUnicodeInfo.GetUnicodeCategory(element, 0);
+            if (category == UnicodeCategory.NonSpacingMark || category == UnicodeCategory.EnclosingMark ||
+                category == UnicodeCategory.Format || category == UnicodeCategory.Control) return 0;
+
+            int code = char.ConvertToUtf32(element, 0);
+            // CJK, Hangul and fullwidth punctuation occupy two cells in the console.
+            bool wide = (code >= 0x1100 && code <= 0x115f)
+                || code == 0x2329 || code == 0x232a
+                || (code >= 0x2e80 && code <= 0xa4cf && code != 0x303f)
+                || (code >= 0xac00 && code <= 0xd7a3)
+                || (code >= 0xf900 && code <= 0xfaff)
+                || (code >= 0xfe10 && code <= 0xfe19)
+                || (code >= 0xfe30 && code <= 0xfe6f)
+                || (code >= 0xff01 && code <= 0xff60)
+                || (code >= 0xffe0 && code <= 0xffe6)
+                || (code >= 0x1f300 && code <= 0x1faff)
+                || (code >= 0x20000 && code <= 0x3fffd);
+            return wide ? 2 : 1;
+        }
+    }
 }
 '@
 }
@@ -620,7 +751,7 @@ function Get-ResumeSlots {
         try {
             $item = Get-Item -LiteralPath $file -Force
             if ($item.PSIsContainer) { throw 'A directory is using the save file name.' }
-            $info = [P5RRoyalResume.V2.SaveCodec]::Inspect($item.FullName)
+            $info = [P5RRoyalResume.V3.SaveCodec]::Inspect($item.FullName)
         } catch [System.Management.Automation.ItemNotFoundException] {
             $status = 'Empty'
         } catch {
@@ -631,13 +762,16 @@ function Get-ResumeSlots {
     }
 }
 
-function Format-ResumeSlot {
+function Get-ResumeSlotDisplay {
     param($Slot)
 
-    if ($Slot.Status -eq 'Empty') { return '空槽' }
-    if ($Slot.Status -eq 'Blocked') { return '读不了，无法安全覆盖' }
     $info = $Slot.Info
-    if ($info.FormatError) { return '格式不支持或档案损坏' }
+    $description = if ($Slot.Status -eq 'Empty') { '空槽' }
+        elseif ($Slot.Status -eq 'Blocked') { '读不了，无法安全覆盖' }
+        elseif ($info.FormatError) { '格式不支持或档案损坏' }
+    if ($description) {
+        return [pscustomobject] @{ Title = $description; Level = ''; PlayTime = '' }
+    }
     $date = [datetime]::new(2016, 4, 1).AddDays($info.Day).ToString('MM/dd')
     $title = switch ([string] $info.Action) {
         'AfterBattle' { '12/24 涩谷站前广场（最终战后）' }
@@ -651,7 +785,19 @@ function Format-ResumeSlot {
             }
         }
     }
-    '{0}  |  Lv.{1}  |  游玩 {2}:{3:00}' -f $title, $info.Level, [int] [Math]::Floor($info.PlayMinutes / 60), ($info.PlayMinutes % 60)
+    [pscustomobject] @{
+        Title = $title
+        Level = [string] $info.Level
+        PlayTime = '{0}:{1:00}' -f [int] [Math]::Floor($info.PlayMinutes / 60), ($info.PlayMinutes % 60)
+    }
+}
+
+function Format-ResumeSlot {
+    param($Slot)
+
+    $display = Get-ResumeSlotDisplay $Slot
+    if (-not $display.Level) { return $display.Title }
+    '{0}  |  Lv.{1}  |  游玩 {2}' -f $display.Title, $display.Level, $display.PlayTime
 }
 
 function Get-ResumeActionText {
@@ -680,6 +826,41 @@ function Test-ResumeSource {
         [string] $Slot.Info.Action -in @('SkipFinalBattle', 'AfterBattle', 'PrepareNovember18', 'UnlockRoyalRoute')
 }
 
+function Write-ResumeTable {
+    param($Slots, [string] $ActionHeading)
+
+    if (-not $Slots.Count) { return }
+    $width = 120
+    try {
+        $visibleWidth = $Host.UI.RawUI.WindowSize.Width
+        if ($visibleWidth -gt 0) { $width = $visibleWidth }
+    } catch { Write-Verbose '无法读取终端窗口宽度。' }
+
+    $columns = @('槽位', '存档', '等级', '游玩时长')
+    if ($ActionHeading) { $columns += $ActionHeading }
+    $rows = [Collections.Generic.List[string[]]]::new()
+    $rows.Add([string[]] $columns)
+    foreach ($slot in $Slots) {
+        $display = Get-ResumeSlotDisplay $slot
+        $row = @(('[{0:00}]' -f $slot.Number), $display.Title, $display.Level, $display.PlayTime)
+        if ($ActionHeading) {
+            $action = if ($slot.Info -and -not $slot.Info.FormatError) { Get-ResumeActionText $slot.Info }
+            $row += [string] $action
+        }
+        if ($width -lt 36) {
+            Write-Host ('{0} {1}' -f $row[0], (Format-ResumeSlot $slot))
+            if ($ActionHeading -and $action) { Write-Host "     $action" }
+        } else {
+            $rows.Add([string[]] $row)
+        }
+    }
+    if ($width -ge 36) {
+        foreach ($line in [P5RRoyalResume.V3.SlotTable]::Render($rows.ToArray(), $width - 1)) {
+            Write-Host $line
+        }
+    }
+}
+
 function Select-ResumeSource {
     param($Slots)
 
@@ -693,16 +874,10 @@ function Select-ResumeSource {
             @{ Expression = { $_.Info.PlayMinutes }; Descending = $true }, Number)
     if ($available.Count) {
         Write-Host '可用源档'
-        foreach ($slot in $available) {
-            Write-Host ('[{0:00}] {1}  |  {2}' -f $slot.Number, (Format-ResumeSlot $slot), (Get-ResumeActionText $slot.Info))
-        }
+        Write-ResumeTable $available -ActionHeading '用途'
     } else {
         Write-Host '这个目录里没有可用源档。可以选备份文件或换一个存档目录。'
-        foreach ($slot in $Slots | Where-Object { $_.Status -ne 'Empty' }) {
-            $text = Format-ResumeSlot $slot
-            if ($slot.Info -and -not $slot.Info.FormatError) { $text += '  |  ' + (Get-ResumeActionText $slot.Info) }
-            Write-Host ('[{0:00}] {1}' -f $slot.Number, $text)
-        }
+        Write-ResumeTable @($Slots | Where-Object { $_.Status -ne 'Empty' }) -ActionHeading '说明'
     }
     $defaultSource = if ($available.Count) { $available[0].Number } else { 0 }
     $prompt = if ($defaultSource) {
@@ -721,7 +896,7 @@ function Select-ResumeSource {
                 $item = Get-Item -LiteralPath (Get-PastedPath $path) -Force
                 if ($item.PSIsContainer) { throw 'Please select a file.' }
                 $source = [pscustomobject] @{ Number = $null; File = $item.FullName
-                    Info = [P5RRoyalResume.V2.SaveCodec]::Inspect($item.FullName); Status = 'Read' }
+                    Info = [P5RRoyalResume.V3.SaveCodec]::Inspect($item.FullName); Status = 'Read' }
             } catch {
                 Write-Host '无法读取这个文件。请选存档文件本身，例如 DATA.DAT。'
                 continue
@@ -744,7 +919,7 @@ function Assert-GameClosed {
 function Get-SlotHash {
     param([string] $Path)
 
-    if ([IO.File]::Exists($Path)) { [P5RRoyalResume.V2.SaveCodec]::HashFile($Path) }
+    if ([IO.File]::Exists($Path)) { [P5RRoyalResume.V3.SaveCodec]::HashFile($Path) }
 }
 
 function Set-ResumeSlot {
@@ -765,7 +940,7 @@ function Set-ResumeSlot {
         if ((Get-SlotHash $Source.File) -cne $sourceHash -or (Get-SlotHash $Target.File) -cne $targetHash) {
             throw '源档或目标槽在显示后发生了变化。请重新运行，确认最新内容。'
         }
-        $candidate = [P5RRoyalResume.V2.SaveCodec]::BuildResume($Source.File, $sourceHash)
+        $candidate = [P5RRoyalResume.V3.SaveCodec]::BuildResume($Source.File, $sourceHash)
         $targetFolder = Split-Path -Parent $Target.File
         [void] [IO.Directory]::CreateDirectory($targetFolder)
         $stage = Join-Path $targetFolder ('.p5r-royal-resume-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
@@ -811,9 +986,7 @@ function Invoke-RoyalResume {
     $targets = @(Get-ResumeSlots $root)
     Write-Host ''
     Write-Host '目标槽（已有档会备份）'
-    foreach ($slot in $targets) {
-        Write-Host ('[{0:00}] {1}' -f $slot.Number, (Format-ResumeSlot $slot))
-    }
+    Write-ResumeTable $targets
     $choices = @($targets | Where-Object { $_.Status -ne 'Blocked' })
     if (-not $choices.Count) { throw '这个目录的槽都无法安全写入。请检查访问权限。' }
     $empty = $choices | Where-Object { $_.Status -eq 'Empty' } | Select-Object -First 1
