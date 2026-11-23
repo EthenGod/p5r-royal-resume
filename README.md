@@ -7,10 +7,12 @@
 退出游戏，在 **Windows PowerShell 5.1** 或 **PowerShell 7** 粘贴这行。
 
 ```powershell
-& ([ScriptBlock]::Create((Invoke-RestMethod -UseBasicParsing 'https://raw.githubusercontent.com/EthenGod/p5r-royal-resume/ccfd6c16ab5fa59f071312459274a468ac13958a/p5r-royal-resume.ps1' -ErrorAction Stop).TrimStart([char]0xFEFF)))
+& ([ScriptBlock]::Create((Invoke-RestMethod -UseBasicParsing 'https://raw.githubusercontent.com/EthenGod/p5r-royal-resume/62c5df443d0bebc4bacf1b3063db006713629137/p5r-royal-resume.ps1' -ErrorAction Stop).TrimStart([char]0xFEFF)))
 ```
 
-输入想用的源档左侧方括号里的编号，例如 `[15]` 就输入 `15`。先看源档表里的「将执行的操作」，再选目标槽，输入 `y` 应用。目标表按列显示 1–16 号槽的存档内容、等级、游玩时长和空槽。完成后进游戏读目标槽。[查看本命令使用的脚本](https://github.com/EthenGod/p5r-royal-resume/blob/ccfd6c16ab5fa59f071312459274a468ac13958a/p5r-royal-resume.ps1)
+输入源档左侧方括号里的编号，例如 `[15]` 就输入 `15`。先看「将执行的操作」，再输入目标槽编号。输入 `y` 应用，完成后进游戏读取目标槽。[查看本命令使用的脚本](https://github.com/EthenGod/p5r-royal-resume/blob/62c5df443d0bebc4bacf1b3063db006713629137/p5r-royal-resume.ps1)
+
+目标表列出 1–16 号槽的存档内容和空槽。有可写入的空槽时，回车会选第一个。只读的存档仍可作源档，选目标槽时会跳过。
 
 ## 哪些源档能用
 
@@ -19,7 +21,7 @@
 - **11/17 已开启丸喜 Coop 的普通存档**。丸喜升到 Coop 9，11/18 正常触发满级剧情。
 - **11/18 到 12/23 的可用存档**。直接补开皇家线，从原日期和地点继续，后续战斗照常进行。
 
-通关存档用于开启二周目。要续接原周目，请找更早的手动档。已经在皇家线的档，工具会提示可以直接读取。
+通关存档用于开启二周目。要续接原周目，请找更早的手动档。看到「可以直接读取」的提示时，在游戏里加载原档即可。
 
 ## 找不到存档时
 
@@ -28,13 +30,13 @@
 - 自动查找失败时，输入 `savedata`、它的上级目录，或某个编号槽里的 `DATA.DAT`。选源档时按 `P` 也可以换目录。
 - 选源档时按 `F`，可读取单独备份的存档文件，包括保留 PC 存档封装的解密副本。
 - 在未安装游戏的电脑处理备份时，可以先建一个名为 `savedata` 的空文件夹作为目标，再用 `F` 选源档。
-- 下载脚本后，也可传入 `-SaveDirectory` 指定目录。
+- 在一行命令末尾加上 `-SaveDirectory 'D:\P5R备份\savedata'`，可直接指定存档目录。请把示例路径换成你的目录。
 
 ## 备份与恢复
 
-目标槽已有存档时，工具会备份该槽并输出备份位置。备份位于存档目录同级的 `p5r-royal-resume-backups` 文件夹。源档或目标槽在显示后发生变化时，工具会停止写入。
+目标槽已有存档时，工具会备份该槽并输出备份位置。备份位于存档目录同级的 `p5r-royal-resume-backups` 文件夹。写入前会重新核对源档和目标槽。检测到变化时，工具会提示重新运行。
 
-要恢复，先退出游戏。将对应备份复制到原槽位文件夹，用它替换 `DATA.DAT`。
+要恢复，先退出游戏。例如要恢复 1 号槽，找到以 `-DATA01.DAT` 结尾的对应备份，将副本命名为 `DATA.DAT`，用它替换 `savedata\DATA01\DATA.DAT`。
 
 ## 参考
 
