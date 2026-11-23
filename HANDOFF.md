@@ -28,4 +28,5 @@
 
 - 原版实测可读入 12 月 24 日晚的涩谷战后剧情。新版对同一份源档生成的游戏数据逐字节相同。
 - Windows PowerShell 5.1 和 7 都用副本验证过。测试覆盖其他战前地图、旧日期补路线、战后解密副本、手动路径、多账号、16 个满槽、取消、备份和显示后改档。本机 PowerShell 7 的满槽测试约 0.9 秒。
-- 发布命令每次从 `main` 分支下载脚本。请求地址带随机参数，避免复用旧缓存。脚本文件保留 UTF-8 BOM，供 Windows PowerShell 5.1 直接读取。命令在执行下载的文本前去掉 BOM。验收时在普通 Windows 用户会话中用两版 PowerShell 实际运行发布命令。
+- 发布命令用 GitHub 文件接口读取 `main` 的脚本。请求地址带随机参数。实测直接访问原始文件地址时，GitHub 在刚推送后仍可能返回旧内容。[GitHub 文件接口](https://docs.github.com/en/rest/repos/contents#get-repository-content)
+- 脚本文件保留 UTF-8 BOM，供 Windows PowerShell 5.1 直接读取。命令在执行下载的文本前去掉 BOM。验收时在普通 Windows 用户会话中用两版 PowerShell 实际运行发布命令。
